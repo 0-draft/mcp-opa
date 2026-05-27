@@ -29,7 +29,7 @@ OUT=$(printf '%s\n' \
     "$(jq -nc --arg r "$REGO" '{jsonrpc:"2.0",id:2,method:"tools/call",params:{name:"evaluate_policy",arguments:{rego:$r,query:"data.smoke.allow",input_json:"{\"user\":\"alice\"}"}}}')" \
     | "$BIN")
 
-DECISION=$(printf '%s\n' "$OUT" | tail -1 | jq -r '.result.content[0].text' | jq -r '.[0].expressions[0].value')
+DECISION=$(printf '%s\n' "$OUT" | jq -r 'select(.id == 2) | .result.content[0].text' | jq -r '.[0].expressions[0].value')
 
 case "$DECISION" in
     true)  echo "✓ smoke: allow=true"; exit 0 ;;
