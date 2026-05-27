@@ -23,7 +23,7 @@ claude mcp add opa -- mcp-opa
 #    and read back the decision.
 ```
 
-You can also drive it manually with `curl` over stdio (advanced — MCP is JSON-RPC over stdin/stdout):
+You can also drive it manually over stdio (advanced; MCP is JSON-RPC over stdin/stdout):
 
 ```bash
 echo '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | mcp-opa

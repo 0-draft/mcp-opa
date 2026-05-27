@@ -8,8 +8,10 @@ package k8s.admission
 violations contains msg if {
 	input.kind.kind == "Pod"
 	not input.object.metadata.labels.app
-	msg := sprintf("Pod %s/%s is missing required label `app`", [
-		input.object.metadata.namespace,
-		input.object.metadata.name,
-	])
+	# Use object.get with fallbacks so an undefined name/namespace doesn't make
+	# the whole sprintf evaluate to undefined and silently swallow the
+	# violation.
+	namespace := object.get(input.object.metadata, "namespace", "default")
+	name := object.get(input.object.metadata, "name", "<unnamed>")
+	msg := sprintf("Pod %s/%s is missing required label `app`", [namespace, name])
 }
