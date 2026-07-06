@@ -4,7 +4,7 @@ go 1.26.4
 
 require (
 	github.com/mark3labs/mcp-go v0.55.1
-	github.com/open-policy-agent/opa v1.18.0
+	github.com/open-policy-agent/opa v1.18.2
 )
 
 require (
