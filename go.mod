@@ -3,7 +3,7 @@ module github.com/0-draft/mcp-opa
 go 1.26.5
 
 require (
-	github.com/mark3labs/mcp-go v0.55.1
+	github.com/mark3labs/mcp-go v0.56.0
 	github.com/open-policy-agent/opa v1.18.2
 )
 
