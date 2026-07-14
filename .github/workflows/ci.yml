@@ -64,6 +64,12 @@ jobs:
           govulncheck ./...
       - name: osv-scanner (OSV.dev cross-ecosystem scan)
         uses: google/osv-scanner-action/osv-scanner-action@9a498708959aeaef5ef730655706c5a1df1edbc2 # v2.3.8
+        env:
+          # setup-go exports GOTOOLCHAIN=local, which leaks into the scanner
+          # container. Its bundled Go is older than our go directive, so the
+          # reachability analysis can't load packages and every vuln in the
+          # module graph gets reported as if it were called.
+          GOTOOLCHAIN: auto
         with:
           scan-args: |-
             --recursive
