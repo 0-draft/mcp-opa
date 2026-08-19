@@ -95,6 +95,41 @@ jobs:
       - name: Lint shell scripts
         run: shellcheck scripts/*.sh
 
+  # The release path was the one thing nothing here exercised, and it broke on
+  # the first tag that used it: `dockers_v2` hands the Dockerfile a context
+  # holding only the cross-compiled binaries laid out by platform, not the
+  # source tree, so a COPY written for an ordinary build context resolved to
+  # nothing. `goreleaser check` validates the config's shape and cannot catch
+  # that. A snapshot build runs the whole thing without publishing, and then the
+  # image it produced has to actually answer.
+  release-snapshot:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      - name: Build the release without publishing it
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
+        with:
+          distribution: goreleaser
+          version: latest
+          # Signing needs the OIDC token a tag run has, and the SBOM step adds
+          # minutes without testing anything this job is for.
+          args: release --snapshot --clean --skip=publish,sign,sbom
+      - name: Check the release image serves MCP over stdio
+        run: |
+          printf '%s\n' \
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"ci","version":"0"}}}' \
+            '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+            '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
+            | docker run -i --rm ghcr.io/kanywst/mcp-opa-authz:latest-amd64 \
+            | jq -e 'select(.id == 2) | (.result.tools | length) == 4' > /dev/null
+
   # The container image is a supported way to run this and the only channel the
   # MCP registry accepts, so a broken Dockerfile is a broken release.
   docker:

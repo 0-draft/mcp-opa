@@ -3,7 +3,14 @@
 # code a second time, on the wrong architecture, without the release ldflags.
 #
 # `docker build .` against the repository root uses ./Dockerfile instead, which
-# does compile from source.
+# does compile from source. This file is not buildable on its own: its context
+# is one goreleaser assembles, holding the binaries laid out by platform
+#
+#   linux/amd64/mcp-opa-authz
+#   linux/arm64/mcp-opa-authz
+#
+# and nothing else — not the source tree. Hence the TARGETPLATFORM prefix on the
+# COPY, which buildx sets per platform as it fans the build out.
 
 FROM gcr.io/distroless/static-debian12:nonroot
 
@@ -12,7 +19,8 @@ LABEL org.opencontainers.image.title="mcp-opa-authz" \
       org.opencontainers.image.source="https://github.com/kanywst/mcp-opa-authz" \
       org.opencontainers.image.licenses="MIT"
 
-COPY mcp-opa-authz /usr/local/bin/mcp-opa-authz
+ARG TARGETPLATFORM
+COPY $TARGETPLATFORM/mcp-opa-authz /usr/local/bin/mcp-opa-authz
 
 USER nonroot:nonroot
 ENTRYPOINT ["/usr/local/bin/mcp-opa-authz"]
