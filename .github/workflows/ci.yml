@@ -83,3 +83,51 @@ jobs:
           persist-credentials: false
       - name: Lint GitHub Actions workflows
         uses: raven-actions/actionlint@3d39aea434753780c3b3d4a1a31c854b4dbf49d7 # v2.2.0
+
+  # scripts/smoke.sh is the only end-to-end check there is, so it is worth
+  # holding to the same standard as the Go code.
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Lint shell scripts
+        run: shellcheck scripts/*.sh
+
+  # The container image is a supported way to run this and the only channel the
+  # MCP registry accepts, so a broken Dockerfile is a broken release.
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build the image
+        run: docker build -t mcp-opa-authz:ci .
+      - name: Check it serves MCP over stdio
+        run: |
+          printf '%s\n' \
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"ci","version":"0"}}}' \
+            '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+            '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
+            | docker run -i --rm mcp-opa-authz:ci \
+            | jq -e 'select(.id == 2) | (.result.tools | length) == 4' > /dev/null
+
+  # server.json is published to the MCP registry from a tag; a schema error
+  # should surface on the pull request rather than during a release.
+  server-json:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Validate server.json
+        run: |
+          python3 -c "import json,sys; json.load(open('server.json'))"
+          jq -e '.name and .description and .version and (.packages | length > 0)' server.json > /dev/null
+          # The environment variables the manifest advertises have to be ones
+          # the server actually reads, or the listing lies to whoever installs it.
+          for v in $(jq -r '.packages[0].environmentVariables[].name' server.json); do
+            grep -q "\"$v\"" config.go || { echo "::error::server.json advertises $v, which config.go does not read"; exit 1; }
+          done
