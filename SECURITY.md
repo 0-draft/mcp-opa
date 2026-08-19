@@ -34,7 +34,7 @@ This server is launched as a subprocess by an MCP client and speaks JSON-RPC ove
 
 **Resource exhaustion from a hostile PDP.** Responses are read through a byte cap (`AUTHZEN_PDP_MAX_RESPONSE_BYTES`), and every request is bounded by `AUTHZEN_PDP_TIMEOUT`.
 
-**Untrusted text flooding the model's context.** PDP error bodies are truncated to 512 bytes. Everything an evaluated policy can put into a result is capped on collection as well as on output: `print()` at 200 lines of 1 KiB each, and the trace at 4000 events, 200 lines, 1 KiB per line. Collection is where the bound has to be — a cap applied only at the end limits the response while the buffer grows for the whole evaluation budget.
+**Untrusted text flooding the model's context.** PDP error bodies are truncated to 512 bytes. Everything an evaluated policy can put into a tool result is capped: `print()` at 200 lines of 1 KiB each, the trace at 4000 events and 200 lines of 1 KiB, the query result at 256 KiB encoded. `print()` and the trace are bounded where they are *collected*, not only where they are rendered — a cap applied at the end limits the response while the buffer grows for the whole evaluation budget.
 
 **A non-answer being reported as a deny.** AuthZEN makes `decision` a required member, so a response omitting it means the PDP failed, not that access was denied. The distinction is preserved throughout, including for `401` and `403`, which describe *this server's* authentication to the PDP and not the subject's access.
 
@@ -46,7 +46,7 @@ This server is launched as a subprocess by an MCP client and speaks JSON-RPC ove
 
 **Decisions your PDP gets wrong.** This forwards a question and reports the answer.
 
-**Rego that is expensive but finishes in time.** The timeout bounds wall clock; there is no memory cap on evaluation.
+**Rego that is expensive but finishes in time.** The timeout bounds wall clock; there is no memory cap on evaluation. In particular the query result is materialised by OPA in full before its size is checked, so the 256 KiB cap governs what reaches the model, not what the process allocated getting there. `MCP_OPA_EVAL_TIMEOUT` is the only bound on that.
 
 **A malicious MCP client.** Anything that can launch this subprocess already has the environment it runs with.
 

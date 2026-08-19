@@ -31,6 +31,11 @@ const (
 	// and wraps others — so the event budget is deliberately looser than the
 	// line budget, and the line cap still applies afterwards.
 	maxTraceEvents = 4 * maxTraceLines
+	// maxResultBytes bounds the query result itself. A policy can produce an
+	// arbitrarily large document within the evaluation budget regardless of how
+	// small its input was — `x := numbers.range(1, 10000000)` is one line — and
+	// the result is the one field returned on every call.
+	maxResultBytes = 256 << 10 // 256 KiB
 )
 
 // evaluateResult is the structured result of evaluate_policy.
@@ -45,10 +50,15 @@ type evaluateResult struct {
 	Defined bool `json:"defined"`
 	// Value is the single expression value when the query produced exactly one
 	// result with exactly one expression — the shape of `data.pkg.allow` and of
-	// nearly every authorization query. Null otherwise; read ResultSet instead.
+	// nearly every authorization query. Null otherwise, and null when the value
+	// is too large to return; read ResultSet or ResultSetOmitted instead.
 	Value any `json:"value"`
-	// ResultSet is OPA's own result, unmodified.
+	// ResultSet is OPA's own result, unmodified — unless it encoded to more
+	// than maxResultBytes, in which case it is omitted and ResultSetOmitted
+	// says so. Defined and Value still answer the question that was asked.
 	ResultSet rego.ResultSet `json:"result_set"`
+	// ResultSetOmitted reports that the result was too large to return.
+	ResultSetOmitted bool `json:"result_set_omitted,omitempty"`
 	// Printed collects output from print() calls in the policy, in evaluation
 	// order, bounded by maxPrintLines and maxPrintLineBytes.
 	Printed []string `json:"printed,omitempty"`
@@ -207,10 +217,22 @@ func evaluatePolicy(ctx context.Context, req mcp.CallToolRequest, cfg *config) (
 	printed, printTruncated := printer.lines()
 	out := evaluateResult{
 		Defined:          len(rs) > 0,
-		Value:            singleValue(rs),
-		ResultSet:        rs,
 		Printed:          printed,
 		PrintedTruncated: printTruncated,
+	}
+
+	// Defined is computed above and always reported: whether the query had an
+	// answer is knowable even when the answer is too big to hand back.
+	if encodesWithin(rs, maxResultBytes) {
+		out.ResultSet = rs
+		out.Value = singleValue(rs)
+	} else {
+		out.ResultSetOmitted = true
+		if v := singleValue(rs); encodesWithin(v, maxResultBytes) {
+			// A single huge binding inside an otherwise large result set is
+			// still worth returning on its own.
+			out.Value = v
+		}
 	}
 	if tracer != nil {
 		out.Trace, out.TraceTruncated = formatTrace(tracer.events, tracer.dropped > 0)
@@ -221,6 +243,35 @@ func evaluatePolicy(ctx context.Context, req mcp.CallToolRequest, cfg *config) (
 		return toolErrorf("failed to encode result: %v", err), nil
 	}
 	return mcp.NewToolResultStructured(out, string(text)), nil
+}
+
+// encodesWithin reports whether v encodes to at most limit bytes. It measures by
+// streaming into a counting sink rather than by marshalling and taking len, so
+// asking the question does not itself allocate the answer.
+func encodesWithin(v any, limit int) bool {
+	w := &countingWriter{limit: limit}
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		return false
+	}
+	return !w.exceeded
+}
+
+// countingWriter discards what it is given and reports whether the total went
+// over limit. It keeps accepting writes after that: json.Encoder has no way to
+// stop early, and returning an error would only replace one allocation with a
+// less legible failure.
+type countingWriter struct {
+	n        int
+	limit    int
+	exceeded bool
+}
+
+func (w *countingWriter) Write(p []byte) (int, error) {
+	w.n += len(p)
+	if w.n > w.limit {
+		w.exceeded = true
+	}
+	return len(p), nil
 }
 
 // singleValue returns the value of the one expression in the one result, when

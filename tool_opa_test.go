@@ -185,6 +185,72 @@ allow if print("short")`,
 	})
 }
 
+// The result is the one field returned on every call, and its size is set by
+// the policy, not by the input — `numbers.range(1, 10000000)` is one line.
+func TestEvaluatePolicy_BoundsResultSize(t *testing.T) {
+	res := callPolicy(t, testConfig(), map[string]any{
+		"rego": `package example
+
+big := numbers.range(1, 500000)`,
+		"query": "data.example.big",
+	})
+
+	out := structured[evaluateResult](t, res)
+	if !out.ResultSetOmitted {
+		t.Fatal("an oversized result set was returned in full")
+	}
+	if len(out.ResultSet) != 0 {
+		t.Fatalf("result set was reported as omitted but carries %d entries", len(out.ResultSet))
+	}
+	// Whether the query had an answer is knowable even when the answer is too
+	// big to hand back, so it is still reported.
+	if !out.Defined {
+		t.Fatal("defined must still be reported when the result is omitted")
+	}
+	if out.Value != nil {
+		t.Fatal("a value that does not fit must not be returned either")
+	}
+
+	if encoded, err := json.Marshal(out); err != nil {
+		t.Fatal(err)
+	} else if len(encoded) > 4*maxResultBytes {
+		t.Fatalf("result payload is %d bytes despite the cap", len(encoded))
+	}
+}
+
+func TestEvaluatePolicy_ResultWithinBoundsIsReturnedWhole(t *testing.T) {
+	res := callPolicy(t, testConfig(), map[string]any{
+		"rego": `package example
+
+small := numbers.range(1, 100)`,
+		"query": "data.example.small",
+	})
+
+	out := structured[evaluateResult](t, res)
+	if out.ResultSetOmitted {
+		t.Fatal("a result that fits must not be omitted")
+	}
+	if len(out.ResultSet) != 1 {
+		t.Fatalf("result set has %d entries, want 1", len(out.ResultSet))
+	}
+	if out.Value == nil {
+		t.Fatal("value was dropped from a result that fits")
+	}
+}
+
+func TestEncodesWithin(t *testing.T) {
+	if !encodesWithin(map[string]string{"a": "b"}, 1024) {
+		t.Fatal("a small value was reported as over the limit")
+	}
+	if encodesWithin(strings.Repeat("x", 2048), 1024) {
+		t.Fatal("a large value was reported as within the limit")
+	}
+	// A value json cannot encode is not "within" anything.
+	if encodesWithin(make(chan int), 1024) {
+		t.Fatal("an unencodable value was reported as within the limit")
+	}
+}
+
 func TestEvaluatePolicy_TraceOptIn(t *testing.T) {
 	args := map[string]any{
 		"rego":       adminPolicy,
