@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [v0.2.0] - 2026-08-19
+
 The first release since the `mcp-opa` / `mcp-authzen` merge. It brings the AuthZEN surface up to the 1.0 final specification, modernises the MCP surface, and closes a set of holes that came from evaluating model-supplied policy in-process.
 
 ### Added
@@ -60,9 +62,10 @@ The first release since the `mcp-opa` / `mcp-authzen` merge. It brings the AuthZ
 
 ---
 
-## [v0.1.0] - 2026
+## [v0.1.0] - 2026-08-19
 
 First release after merging `0-draft/mcp-opa` and `0-draft/mcp-authzen` into one binary. Two tools, `evaluate_policy` and `authzen_evaluate`, over MCP stdio.
 
-[Unreleased]: https://github.com/kanywst/mcp-opa-authz/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/kanywst/mcp-opa-authz/compare/v0.2.0...HEAD
+[v0.2.0]: https://github.com/kanywst/mcp-opa-authz/compare/v0.1.0...v0.2.0
 [v0.1.0]: https://github.com/kanywst/mcp-opa-authz/releases/tag/v0.1.0
