@@ -1,0 +1,68 @@
+name: publish to MCP registry
+
+# Listing in the official MCP registry is how a client discovers this server
+# without being told the repository name. The listing is per-version, so it runs
+# once per release — after the release workflow has pushed the image the
+# manifest points at.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to publish, without the leading v (e.g. 0.2.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  # The registry authenticates the io.github.kanywst namespace with a GitHub
+  # OIDC token, so there is no secret to leak or rotate.
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # server.json carries a version in two places, and the registry rejects a
+      # manifest whose package version does not exist. Both are stamped from the
+      # tag rather than maintained by hand, because a stale one fails at publish
+      # time with a message about the registry rather than about this file.
+      - name: Stamp the released version into server.json
+        env:
+          VERSION: ${{ inputs.version || github.event.release.tag_name }}
+        run: |
+          v="${VERSION#v}"
+          if [ -z "$v" ]; then
+            echo "::error::no version to publish"
+            exit 1
+          fi
+          jq --arg v "$v" '.version = $v | .packages[0].version = $v' server.json > server.json.tmp
+          mv server.json.tmp server.json
+          cat server.json
+
+      # The image has to be pullable before the registry will accept a manifest
+      # pointing at it. A release that failed halfway would otherwise produce a
+      # listing nobody can install.
+      - name: Verify the image exists
+        env:
+          VERSION: ${{ inputs.version || github.event.release.tag_name }}
+        run: |
+          v="${VERSION#v}"
+          docker manifest inspect "ghcr.io/kanywst/mcp-opa-authz:${v}" > /dev/null
+
+      - name: Install mcp-publisher
+        run: |
+          curl -fsSL "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/').tar.gz" \
+            | tar -xz mcp-publisher
+          ./mcp-publisher --help > /dev/null
+
+      - name: Publish
+        run: |
+          ./mcp-publisher login github-oidc
+          ./mcp-publisher publish

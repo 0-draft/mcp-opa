@@ -1,0 +1,18 @@
+# Release image. goreleaser has already cross-compiled the binary, so this
+# stage only packages it — building from source here would compile the same
+# code a second time, on the wrong architecture, without the release ldflags.
+#
+# `docker build .` against the repository root uses ./Dockerfile instead, which
+# does compile from source.
+
+FROM gcr.io/distroless/static-debian12:nonroot
+
+LABEL org.opencontainers.image.title="mcp-opa-authz" \
+      org.opencontainers.image.description="MCP server exposing OPA/Rego evaluation and an OpenID AuthZEN 1.0 PDP" \
+      org.opencontainers.image.source="https://github.com/kanywst/mcp-opa-authz" \
+      org.opencontainers.image.licenses="MIT"
+
+COPY mcp-opa-authz /usr/local/bin/mcp-opa-authz
+
+USER nonroot:nonroot
+ENTRYPOINT ["/usr/local/bin/mcp-opa-authz"]
