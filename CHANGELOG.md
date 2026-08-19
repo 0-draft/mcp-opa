@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [v0.2.1] - 2026-08-20
+
+Release plumbing only. The binaries, the container image's behaviour and every
+tool are byte-for-byte what v0.2.0 shipped; nothing about the server changed.
+
+### Fixed
+
+- **The container image now carries `io.modelcontextprotocol.server.name`.** The MCP registry refuses to list an image that does not name the server it belongs to — it is how the registry proves the `io.github.kanywst` namespace owns the image — so v0.2.0's listing was rejected and never happened. The label is on both Dockerfiles, and CI now checks it against `name` in `server.json`.
+- **`server.json` puts the OCI tag in `identifier`** rather than in a separate `version` field, which the registry rejects outright for OCI packages, and its `description` is under the registry's 100-character limit.
+
+### Changed
+
+- The registry publish is called from `release.yml` rather than triggered by `release: published`. goreleaser creates the release with `GITHUB_TOKEN`, and GitHub does not start workflows from a `GITHUB_TOKEN` action, so that trigger never fired — the listing silently never ran, with nothing red to show for it.
+- CI gained `release-snapshot`, which runs the whole goreleaser release without publishing and then makes the image it produced answer over stdio; a `server.json` check against the schema the file itself declares; and shellcheck. The v0.2.0 release broke on a `COPY` that could not resolve, because nothing had ever run the release path.
+
 ## [v0.2.0] - 2026-08-19
 
 The first release since the `mcp-opa` / `mcp-authzen` merge. It brings the AuthZEN surface up to the 1.0 final specification, modernises the MCP surface, and closes a set of holes that came from evaluating model-supplied policy in-process.
@@ -66,6 +81,7 @@ The first release since the `mcp-opa` / `mcp-authzen` merge. It brings the AuthZ
 
 First release after merging `0-draft/mcp-opa` and `0-draft/mcp-authzen` into one binary. Two tools, `evaluate_policy` and `authzen_evaluate`, over MCP stdio.
 
-[Unreleased]: https://github.com/kanywst/mcp-opa-authz/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/kanywst/mcp-opa-authz/compare/v0.2.1...HEAD
+[v0.2.1]: https://github.com/kanywst/mcp-opa-authz/compare/v0.2.0...v0.2.1
 [v0.2.0]: https://github.com/kanywst/mcp-opa-authz/compare/v0.1.0...v0.2.0
 [v0.1.0]: https://github.com/kanywst/mcp-opa-authz/releases/tag/v0.1.0
