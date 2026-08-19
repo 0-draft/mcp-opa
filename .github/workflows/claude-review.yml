@@ -1,0 +1,189 @@
+name: Claude review
+
+# CI answers "does it build and do the tests pass". This asks the question no
+# script here can. It reviews, it does not gate: nothing here is a required
+# check, and a red run means the review did not happen, never that the code is
+# wrong — the findings are comments on the pull request.
+#
+# The action refuses to run when this file differs from the copy on the default
+# branch, so a pull request cannot rewrite its own reviewer. The cost is that
+# any change to this file, including the one that added it, goes unreviewed by
+# Claude until it is merged.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions: {}
+
+# One review per pull request. A rapid re-push cancels the run it superseded
+# rather than paying for a review of a diff that no longer exists.
+concurrency:
+  group: claude-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    # A pull request from a fork gets no secrets, so the job would fail on
+    # authentication rather than say anything useful.
+    #
+    # Dependabot is skipped outright, on both the actor and the author. A run
+    # Dependabot triggers cannot work at all — it reads the Dependabot secret
+    # store rather than the Actions one, so the token is empty there regardless
+    # of the branch living in this repository. A run a human triggers on a
+    # Dependabot branch would work, and is still not wanted: a version bump has
+    # nothing for a reviewer to say that `vuln` and `test` have not already
+    # said, and paying for a review of every weekly bump is how the reviewer
+    # becomes noise people learn to scroll past.
+    #
+    # Drafts are skipped until they are marked ready, which is what the
+    # ready_for_review trigger is for.
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.draft == false &&
+      github.actor != 'dependabot[bot]' &&
+      github.event.pull_request.user.login != 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      pull-requests: write
+      # Required by the action's default GitHub App authentication.
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # Without the secret the action exits successfully having reviewed
+      # nothing, which is worse than failing: the check goes green and the
+      # pull request looks reviewed. Fail here instead, where the reason is
+      # legible.
+      - name: Require the token
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+        run: |
+          if [ -z "$CLAUDE_CODE_OAUTH_TOKEN" ]; then
+            echo "::error::CLAUDE_CODE_OAUTH_TOKEN is not set. Generate one with 'claude setup-token', then: gh secret set CLAUDE_CODE_OAUTH_TOKEN"
+            exit 1
+          fi
+
+      # Snapshotted before the review so the check below can tell whether this
+      # run added anything, rather than seeing another bot's comment and
+      # concluding the review landed.
+      - name: Count comments before the review
+        id: before
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          n=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments" --jq 'length')
+          m=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}/comments" --jq 'length')
+          echo "count=$((n + m))" >> "$GITHUB_OUTPUT"
+
+      - uses: anthropics/claude-code-action@9d7150bc8a3dae8149739a88019d192b579ad90c # v1
+        id: claude
+        with:
+          # A subscription token, not an API key: runs against the Claude plan
+          # instead of API credits. Generate it with `claude setup-token`.
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: |
+            REPO: ${{ github.repository }}
+            PR: ${{ github.event.pull_request.number }}
+
+            This repo is an MCP stdio server that gives an agent authorization answers
+            from real policy code: `evaluate_policy` runs model-supplied Rego in-process
+            via OPA, and `authzen_evaluate` / `authzen_evaluate_batch` /
+            `authzen_discover` speak the OpenID AuthZEN Authorization API 1.0 to a
+            remote PDP.
+
+            Do not repeat what CI already does. The vet, lint, test, smoke and vuln jobs
+            run on this PR already.
+
+            Look for what only a reader can catch:
+
+            1. Fail-open. A failure to obtain a decision must never be reported as a
+               deny, and a deny must never be reported as a failure. The `decision`
+               member is a *bool for exactly this reason — a PDP that omits it decoded
+               into a plain bool would silently become a deny. Check every new path that
+               produces a decision.
+
+            2. Batch alignment. `authzen_evaluate_batch` returns decisions carrying an
+               explicit index. An early-exit semantic legitimately returns fewer
+               decisions than there were evaluations. A decision re-associated with the
+               wrong resource is the worst bug this repo can ship.
+
+            3. The Rego sandbox. `evaluate_policy` compiles source that came from a
+               model and runs it inside this process. `opa_capabilities.go` removes
+               http.send, net.lookup_ip_addr and opa.runtime. Anything that widens the
+               capability set, bypasses `cfg.capabilities()`, or removes the evaluation
+               deadline is a security regression, not a refactor.
+
+            4. Drift from the AuthZEN 1.0 final text. Member names and request/response
+               shapes are normative. This is the easiest defect to miss here, because
+               both sides still parse when a name is wrong.
+
+            5. Untrusted input reaching the model's context unbounded — PDP response
+               bodies, traces, error text. Everything echoed back has a cap; check that
+               new paths keep one.
+
+            6. Dependency semantics. An OPA bump can change evaluation behaviour, and an
+               mcp-go bump can change the wire shape of a tool result. Both deserve more
+               scrutiny here than an ordinary bump.
+
+            Nobody reads your reply. The only output that reaches a human is what
+            you post to the pull request, so every run ends with a posted comment,
+            including a run that finds nothing.
+
+            Post findings as inline comments on the lines they concern, then close
+            with exactly one top-level `gh pr comment` carrying the summary. Be
+            specific and cite `file:line`. If the diff is clean against all of the
+            above, post that in one line rather than manufacturing nits.
+
+          # `--allowedTools` adds to the base GitHub tools; Bash is not
+          # available unless a command is named here. Reading a diff is not
+          # enough to review one: every question above needs the file around the
+          # change, the history behind it, or the specification text.
+          claude_args: |
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Read,Grep,Glob,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(git log:*),Bash(git diff:*),Bash(git show:*),Bash(go doc:*),WebFetch(domain:openid.net),WebFetch(domain:openid.github.io),WebFetch(domain:modelcontextprotocol.io),WebFetch(domain:raw.githubusercontent.com)"
+
+      # The action exits 0 whether or not the review reached the pull request,
+      # so a run that was denied every tool it needed still shows a green check
+      # against a pull request nobody read. Both failure modes are caught here:
+      # tool calls the allowlist refused, and a review that posted nothing.
+      - name: Require the review to land
+        if: always() && steps.claude.conclusion != 'skipped'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          EXECUTION_FILE: ${{ steps.claude.outputs.execution_file }}
+          BEFORE: ${{ steps.before.outputs.count }}
+        run: |
+          # No execution file means the action declined to run Claude at all,
+          # which is what happens on a pull request that edits this workflow.
+          # There is nothing to hold it to; say so and stop.
+          if [ -z "$EXECUTION_FILE" ] || [ ! -f "$EXECUTION_FILE" ]; then
+            echo "::notice::the reviewer did not run, so there is nothing to check; expected on a pull request that changes this workflow"
+            exit 0
+          fi
+
+          denied=$(jq -r '[.. | objects | select(has("permission_denials_count")) | .permission_denials_count] | first // 0' "$EXECUTION_FILE")
+
+          n=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments" --jq 'length')
+          m=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}/comments" --jq 'length')
+          posted=$(( n + m - BEFORE ))
+
+          failed=0
+          if [ "$denied" -gt 0 ]; then
+            echo "::error::the reviewer was denied $denied tool call(s); widen --allowedTools above"
+            failed=1
+          fi
+          if [ "$posted" -le 0 ]; then
+            echo "::error::the reviewer posted nothing on #${PR}"
+            failed=1
+          fi
+          if [ "$failed" -eq 1 ]; then
+            exit 1
+          fi
+          echo "review landed: $posted comment(s), no denied tool calls"
