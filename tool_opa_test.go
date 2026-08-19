@@ -205,7 +205,64 @@ func TestEvaluatePolicy_TraceOptIn(t *testing.T) {
 	if len(on.Trace) > maxTraceLines {
 		t.Fatalf("trace is %d lines, over the %d cap", len(on.Trace), maxTraceLines)
 	}
+	if on.TraceTruncated {
+		t.Fatal("a trace that fits must not be reported as truncated")
+	}
 }
+
+// The trace is collected from a model-supplied policy, so the bound has to be
+// on collection and not only on what is returned — otherwise the cap limits the
+// response while the buffer grows for the whole evaluation budget and the
+// renderer walks all of it.
+func TestEvaluatePolicy_BoundsTraceCollection(t *testing.T) {
+	res := callPolicy(t, testConfig(), map[string]any{
+		"rego": `package example
+
+allow if {
+	every i in numbers.range(1, 5000) {
+		i > 0
+	}
+}`,
+		"query": "data.example.allow",
+		"trace": true,
+	})
+
+	out := structured[evaluateResult](t, res)
+	if len(out.Trace) > maxTraceLines {
+		t.Fatalf("trace is %d lines, over the %d cap", len(out.Trace), maxTraceLines)
+	}
+	if !out.TraceTruncated {
+		t.Fatal("the trace was cut without saying so")
+	}
+	for i, line := range out.Trace {
+		if len(line) > maxTraceLineLimit() {
+			t.Fatalf("trace line %d is %d bytes, over the per-line cap", i, len(line))
+		}
+	}
+}
+
+// A trace line carries plugged local bindings, which come from input_json.
+func TestEvaluatePolicy_BoundsTraceLineLength(t *testing.T) {
+	res := callPolicy(t, testConfig(), map[string]any{
+		"rego": `package example
+
+allow if input.blob != ""`,
+		"query":      "data.example.allow",
+		"input_json": `{"blob":"` + strings.Repeat("A", 20000) + `"}`,
+		"trace":      true,
+	})
+
+	out := structured[evaluateResult](t, res)
+	for i, line := range out.Trace {
+		if len(line) > maxTraceLineLimit() {
+			t.Fatalf("trace line %d is %d bytes, over the per-line cap", i, len(line))
+		}
+	}
+}
+
+// maxTraceLineLimit is the longest a capped line can be: the cap plus the
+// marker appended to it.
+func maxTraceLineLimit() int { return maxPrintLineBytes + len("… (truncated)") }
 
 func TestEvaluatePolicy_RegoV0(t *testing.T) {
 	// A pre-OPA-1.0 policy: no `if`, no `contains`.

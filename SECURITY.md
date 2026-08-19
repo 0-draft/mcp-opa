@@ -34,7 +34,7 @@ This server is launched as a subprocess by an MCP client and speaks JSON-RPC ove
 
 **Resource exhaustion from a hostile PDP.** Responses are read through a byte cap (`AUTHZEN_PDP_MAX_RESPONSE_BYTES`), and every request is bounded by `AUTHZEN_PDP_TIMEOUT`.
 
-**Untrusted text flooding the model's context.** PDP error bodies are truncated to 512 bytes; evaluation traces are capped at 200 lines; `print()` output from an evaluated policy is capped at 200 lines of 1 KiB each. The last one matters because `print()` is under the policy's own control and the policy came from a model.
+**Untrusted text flooding the model's context.** PDP error bodies are truncated to 512 bytes. Everything an evaluated policy can put into a result is capped on collection as well as on output: `print()` at 200 lines of 1 KiB each, and the trace at 4000 events, 200 lines, 1 KiB per line. Collection is where the bound has to be — a cap applied only at the end limits the response while the buffer grows for the whole evaluation budget.
 
 **A non-answer being reported as a deny.** AuthZEN makes `decision` a required member, so a response omitting it means the PDP failed, not that access was denied. The distinction is preserved throughout, including for `401` and `403`, which describe *this server's* authentication to the PDP and not the subject's access.
 

@@ -26,6 +26,11 @@ const (
 	maxTraceLines     = 200
 	maxPrintLines     = 200
 	maxPrintLineBytes = 1024
+	// maxTraceEvents bounds what is *collected*, not just what is returned.
+	// One evaluation event is not one output line — PrettyTrace filters some
+	// and wraps others — so the event budget is deliberately looser than the
+	// line budget, and the line cap still applies afterwards.
+	maxTraceEvents = 4 * maxTraceLines
 )
 
 // evaluateResult is the structured result of evaluate_policy.
@@ -171,9 +176,9 @@ func evaluatePolicy(ctx context.Context, req mcp.CallToolRequest, cfg *config) (
 	// prepared query is compiled once and evaluated with per-call options, and
 	// passing the tracer to rego.New here would silently collect nothing.
 	var evalOptions []rego.EvalOption
-	var tracer *topdown.BufferTracer
+	var tracer *boundedTracer
 	if req.GetBool("trace", false) {
-		tracer = topdown.NewBufferTracer()
+		tracer = &boundedTracer{}
 		evalOptions = append(evalOptions, rego.EvalQueryTracer(tracer))
 	}
 
@@ -208,7 +213,7 @@ func evaluatePolicy(ctx context.Context, req mcp.CallToolRequest, cfg *config) (
 		PrintedTruncated: printTruncated,
 	}
 	if tracer != nil {
-		out.Trace, out.TraceTruncated = formatTrace(*tracer)
+		out.Trace, out.TraceTruncated = formatTrace(tracer.events, tracer.dropped > 0)
 	}
 
 	text, err := json.MarshalIndent(out, "", "  ")
@@ -249,18 +254,62 @@ func sandboxHint(err error, cfg *config) string {
 	return ""
 }
 
-// formatTrace renders a buffered trace, capped. Reports whether it was cut.
-func formatTrace(events []*topdown.Event) ([]string, bool) {
+// boundedTracer collects evaluation events up to maxTraceEvents and then stops.
+//
+// topdown.BufferTracer keeps every event for the whole evaluation, bounded only
+// by RegoTimeout — and rendering happened over the full buffer before the line
+// cap was applied, so the cap bounded what was returned and not what was
+// allocated. The policy being traced is model-supplied, so the collection is
+// what needs the bound.
+//
+// OPA may evaluate concurrently, so the tracer has to be safe to call from more
+// than one goroutine.
+type boundedTracer struct {
+	mu      sync.Mutex
+	events  []*topdown.Event
+	dropped int
+}
+
+func (t *boundedTracer) Enabled() bool { return true }
+
+func (t *boundedTracer) Config() topdown.TraceConfig {
+	return topdown.TraceConfig{PlugLocalVars: true}
+}
+
+func (t *boundedTracer) TraceEvent(evt topdown.Event) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if len(t.events) >= maxTraceEvents {
+		t.dropped++
+		return
+	}
+	t.events = append(t.events, &evt)
+}
+
+// formatTrace renders collected events, capped by line count and line length.
+// dropped reports that collection itself stopped early.
+func formatTrace(events []*topdown.Event, dropped bool) ([]string, bool) {
 	if len(events) == 0 {
-		return nil, false
+		return nil, dropped
 	}
 	var buf bytes.Buffer
 	topdown.PrettyTraceWithLocation(&buf, events)
 	lines := strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
+
+	truncated := dropped
 	if len(lines) > maxTraceLines {
-		return lines[:maxTraceLines], true
+		lines = lines[:maxTraceLines]
+		truncated = true
 	}
-	return lines, false
+	// A single trace line carries plugged local variable bindings, which are
+	// values the policy — and through input_json, the caller — chose.
+	for i, l := range lines {
+		if len(l) > maxPrintLineBytes {
+			lines[i] = l[:maxPrintLineBytes] + "… (truncated)"
+			truncated = true
+		}
+	}
+	return lines, truncated
 }
 
 // printCollector captures print() output. OPA may evaluate concurrently, so the
