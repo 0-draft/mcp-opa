@@ -161,6 +161,14 @@ jobs:
         run: |
           python3 -c "import json,sys; json.load(open('server.json'))"
           jq -e '.name and .description and .version and (.packages | length > 0)' server.json > /dev/null
+          # The registry caps the description at 100 characters and only says so
+          # at publish time, on a tag, after the release has already shipped.
+          # v0.2.0 failed on exactly this with a 127-character one.
+          n=$(jq -r '.description | length' server.json)
+          if [ "$n" -gt 100 ]; then
+            echo "::error::server.json description is $n characters; the MCP registry rejects anything over 100"
+            exit 1
+          fi
           # The environment variables the manifest advertises have to be ones
           # the server actually reads, or the listing lies to whoever installs it.
           for v in $(jq -r '.packages[0].environmentVariables[].name' server.json); do

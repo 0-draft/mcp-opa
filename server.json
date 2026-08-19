@@ -1,7 +1,7 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.kanywst/mcp-opa-authz",
-  "description": "Authorization answers from real policy code: evaluate Rego in-process via OPA, or ask an OpenID AuthZEN 1.0 PDP for a decision.",
+  "description": "Authorization answers from real policy code: evaluate Rego locally, or ask an AuthZEN 1.0 PDP.",
   "version": "0.1.0",
   "repository": {
     "url": "https://github.com/kanywst/mcp-opa-authz",
