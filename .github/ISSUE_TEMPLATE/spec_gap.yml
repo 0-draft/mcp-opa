@@ -1,0 +1,36 @@
+name: Specification gap
+description: A mismatch against the AuthZEN 1.0 or MCP specification
+labels: [spec-conformance]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Member names and request shapes are normative. A mismatch is a real bug
+        even when both sides still parse and a decision still comes back.
+
+  - type: dropdown
+    id: spec
+    attributes:
+      label: Which specification
+      options:
+        - OpenID AuthZEN Authorization API 1.0
+        - Model Context Protocol
+        - An AuthZEN profile (COAZ, AARP, Obligations)
+    validations:
+      required: true
+
+  - type: input
+    id: section
+    attributes:
+      label: Section
+      description: The section or member name, with a link if you have one.
+      placeholder: "Access Evaluations §7.1, `evaluations_semantic`"
+    validations:
+      required: true
+
+  - type: textarea
+    id: gap
+    attributes:
+      label: What the text requires, and what this does instead
+    validations:
+      required: true
