@@ -1,0 +1,40 @@
+version: "2"
+
+# CI pins the golangci-lint version, so this file names linters rather than
+# relying on whatever the default set happens to be in a given release.
+linters:
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - gocritic
+    - misspell
+    - bodyclose
+    - errorlint
+    - nilerr
+    - noctx
+    - unconvert
+    - usestdlibvars
+  settings:
+    gocritic:
+      enabled-tags:
+        - diagnostic
+        - performance
+        - style
+      disabled-checks:
+        - ifElseChain
+        - hugeParam
+    staticcheck:
+      checks:
+        - all
+
+formatters:
+  enable:
+    - gofmt
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
