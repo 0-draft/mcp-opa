@@ -18,10 +18,15 @@ import (
 	"github.com/open-policy-agent/opa/v1/topdown/print"
 )
 
-// maxTraceLines bounds the explanation returned to the model. A trace of a
-// non-trivial policy runs to thousands of lines; past a couple of hundred it
-// stops being an explanation and starts being a way to fill a context window.
-const maxTraceLines = 200
+// Bounds on the text a policy can put into the tool result. A trace of a
+// non-trivial policy runs to thousands of lines, and print() is under the
+// policy's own control; past a couple of hundred lines either one stops being
+// an explanation and starts being a way to fill a context window.
+const (
+	maxTraceLines     = 200
+	maxPrintLines     = 200
+	maxPrintLineBytes = 1024
+)
 
 // evaluateResult is the structured result of evaluate_policy.
 //
@@ -40,8 +45,11 @@ type evaluateResult struct {
 	// ResultSet is OPA's own result, unmodified.
 	ResultSet rego.ResultSet `json:"result_set"`
 	// Printed collects output from print() calls in the policy, in evaluation
-	// order.
+	// order, bounded by maxPrintLines and maxPrintLineBytes.
 	Printed []string `json:"printed,omitempty"`
+	// PrintedTruncated reports that print() output was cut, either because a
+	// line was too long or because there were too many of them.
+	PrintedTruncated bool `json:"printed_truncated,omitempty"`
 	// Trace is a pretty-printed evaluation trace, present only when the caller
 	// asked for one.
 	Trace []string `json:"trace,omitempty"`
@@ -191,11 +199,13 @@ func evaluatePolicy(ctx context.Context, req mcp.CallToolRequest, cfg *config) (
 		return toolErrorf("rego eval error: %v", err), nil
 	}
 
+	printed, printTruncated := printer.lines()
 	out := evaluateResult{
-		Defined:   len(rs) > 0,
-		Value:     singleValue(rs),
-		ResultSet: rs,
-		Printed:   printer.lines(),
+		Defined:          len(rs) > 0,
+		Value:            singleValue(rs),
+		ResultSet:        rs,
+		Printed:          printed,
+		PrintedTruncated: printTruncated,
 	}
 	if tracer != nil {
 		out.Trace, out.TraceTruncated = formatTrace(*tracer)
@@ -255,20 +265,44 @@ func formatTrace(events []*topdown.Event) ([]string, bool) {
 
 // printCollector captures print() output. OPA may evaluate concurrently, so the
 // hook has to be safe to call from more than one goroutine.
+//
+// It is bounded for the same reason the trace and the PDP response body are.
+// The policy is model-supplied and runs in-process for as long as RegoTimeout
+// allows, which is a lot of iterations when nothing does I/O:
+//
+//	every i in numbers.range(1, 1000000) { print(i) }
+//
+// Unbounded, that is both a way to grow this process without limit and a way to
+// fill the model's context with text the policy chose. The cap is on the count
+// and on each line, and collection stops at the cap rather than continuing to
+// allocate for output that will be discarded.
 type printCollector struct {
-	mu  sync.Mutex
-	out []string
+	mu        sync.Mutex
+	out       []string
+	dropped   int
+	truncated bool
 }
 
 func (p *printCollector) Print(_ print.Context, msg string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+
+	if len(p.out) >= maxPrintLines {
+		p.dropped++
+		return nil
+	}
+	if len(msg) > maxPrintLineBytes {
+		msg = msg[:maxPrintLineBytes] + "… (truncated)"
+		p.truncated = true
+	}
 	p.out = append(p.out, msg)
 	return nil
 }
 
-func (p *printCollector) lines() []string {
+// lines returns the captured output and whether anything was cut, either
+// because a line was too long or because there were too many of them.
+func (p *printCollector) lines() ([]string, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.out
+	return p.out, p.truncated || p.dropped > 0
 }

@@ -122,6 +122,69 @@ allow if {
 	}
 }
 
+// print() is under the policy's control, and the policy came from a model. Left
+// unbounded it is both a way to grow this process and a way to fill the model's
+// context — the same hole the trace cap and the PDP body cap exist to close.
+func TestEvaluatePolicy_BoundsPrintOutput(t *testing.T) {
+	t.Run("too many lines", func(t *testing.T) {
+		res := callPolicy(t, testConfig(), map[string]any{
+			"rego": `package example
+
+allow if {
+	every i in numbers.range(1, 5000) {
+		print(i)
+	}
+}`,
+			"query": "data.example.allow",
+		})
+
+		out := structured[evaluateResult](t, res)
+		if len(out.Printed) > maxPrintLines {
+			t.Fatalf("captured %d lines, over the %d cap", len(out.Printed), maxPrintLines)
+		}
+		if len(out.Printed) != maxPrintLines {
+			t.Fatalf("captured %d lines; the policy printed far more than the cap", len(out.Printed))
+		}
+		if !out.PrintedTruncated {
+			t.Fatal("output was cut without saying so")
+		}
+	})
+
+	t.Run("line too long", func(t *testing.T) {
+		res := callPolicy(t, testConfig(), map[string]any{
+			"rego": `package example
+
+allow if print(concat("", [x | some _ in numbers.range(1, 5000); x := "AAAAAAAAAA"]))`,
+			"query": "data.example.allow",
+		})
+
+		out := structured[evaluateResult](t, res)
+		if len(out.Printed) != 1 {
+			t.Fatalf("captured %d lines, want 1", len(out.Printed))
+		}
+		if len(out.Printed[0]) > maxPrintLineBytes+len("… (truncated)") {
+			t.Fatalf("line is %d bytes, over the %d cap", len(out.Printed[0]), maxPrintLineBytes)
+		}
+		if !out.PrintedTruncated {
+			t.Fatal("the line was cut without saying so")
+		}
+	})
+
+	t.Run("output within the bounds is not flagged", func(t *testing.T) {
+		res := callPolicy(t, testConfig(), map[string]any{
+			"rego": `package example
+
+allow if print("short")`,
+			"query": "data.example.allow",
+		})
+
+		out := structured[evaluateResult](t, res)
+		if out.PrintedTruncated {
+			t.Fatal("output that fits must not be reported as truncated")
+		}
+	})
+}
+
 func TestEvaluatePolicy_TraceOptIn(t *testing.T) {
 	args := map[string]any{
 		"rego":       adminPolicy,
