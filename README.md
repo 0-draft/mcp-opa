@@ -91,7 +91,7 @@ Then confirming against the PDP that actually runs:
 | `rego_version` | no | `v1` (default) or `v0` for pre-OPA-1.0 syntax. |
 | `trace` | no | Return a pretty-printed evaluation trace. Verbose; bounded at 4000 events, 200 lines, 1 KiB per line. |
 
-Returns `defined`, `value`, the raw OPA `result_set`, any `print()` output (capped at 200 lines of 1 KiB), and the trace when asked for.
+Returns `defined`, `value`, the raw OPA `result_set` (omitted with `result_set_omitted` past 256 KiB encoded), any `print()` output (200 lines of 1 KiB), and the trace when asked for.
 
 ### `authzen_evaluate`
 
