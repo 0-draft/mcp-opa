@@ -19,3 +19,16 @@ updates:
     groups:
       actions:
         patterns: ["*"]
+
+  # Two Dockerfiles: one builds from source for humans, one packages the
+  # goreleaser binary for releases. Both pin base images that need updating.
+  - package-ecosystem: docker
+    directories:
+      - /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      docker:
+        patterns: ["*"]

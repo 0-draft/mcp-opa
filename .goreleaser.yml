@@ -34,6 +34,25 @@ archives:
 checksum:
   name_template: "{{ .ProjectName }}-{{ .Version }}-checksums.txt"
 
+# The official MCP registry does not accept a bare GitHub Releases binary as a
+# distribution channel, and there is no Go package type. An OCI image is the
+# channel that works, and it is also what MCP clients that launch servers with
+# `docker run` want. See server.json.
+dockers_v2:
+  - images:
+      - "ghcr.io/kanywst/{{ .ProjectName }}"
+    tags:
+      - "{{ .Version }}"
+      - "latest"
+    dockerfile: Dockerfile.goreleaser
+    platforms:
+      - linux/amd64
+      - linux/arm64
+    labels:
+      org.opencontainers.image.version: "{{ .Version }}"
+      org.opencontainers.image.revision: "{{ .FullCommit }}"
+      org.opencontainers.image.created: "{{ .Date }}"
+
 release:
   prerelease: auto
 
