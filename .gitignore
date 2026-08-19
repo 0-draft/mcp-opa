@@ -3,3 +3,8 @@
 *.test
 *.out
 .DS_Store
+
+# Claude Code / local agent scratch
+/CLAUDE.md
+/.claude/
+/AGENTS.md
