@@ -1,20 +1,24 @@
-// mcp-opa is a Model Context Protocol (MCP) server that exposes
-// Open Policy Agent (OPA) Rego evaluation as a callable tool. Designed to be
-// launched as a subprocess by an MCP client (Claude Code, Cursor, etc.) over
-// stdio.
+// mcp-opa-authz is a Model Context Protocol (MCP) server that gives an LLM
+// agent two ways to get an authorization answer from real policy code instead
+// of from its own guess:
+//
+//	evaluate_policy    Evaluate a Rego module locally, in-process, via OPA.
+//	authzen_evaluate   Ask a remote OpenID AuthZEN 1.0 PDP for a decision.
+//
+// The two cover the same question at different layers. `evaluate_policy` is for
+// authoring and debugging a policy you have the source of; `authzen_evaluate`
+// is for asking the PDP that actually governs a system at runtime.
+//
+// Designed to be launched as a subprocess by an MCP client (Claude Code,
+// Cursor, etc.) over stdio.
 package main
 
 import (
-	"context"
-	"encoding/json"
 	"fmt"
 	"log"
 	"os"
 
-	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
-	"github.com/open-policy-agent/opa/v1/rego"
-	"github.com/open-policy-agent/opa/v1/storage/inmem"
 )
 
 var version = "dev"
@@ -23,106 +27,43 @@ func main() {
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case "--version", "-v", "version":
-			fmt.Printf("mcp-opa %s\n", version)
+			fmt.Printf("mcp-opa-authz %s\n", version)
 			return
 		case "--help", "-h", "help":
-			fmt.Println(`mcp-opa — MCP server exposing OPA/Rego policy evaluation as a tool.
+			fmt.Println(`mcp-opa-authz — MCP server exposing OPA/Rego evaluation and an OpenID AuthZEN 1.0 PDP.
 
 Usage:
-  mcp-opa             Run as an MCP stdio server (default).
-  mcp-opa --version   Print version.
+  mcp-opa-authz             Run as an MCP stdio server (default).
+  mcp-opa-authz --version   Print version.
 
 Tools exposed:
-  evaluate_policy     Evaluate a Rego module against an input document.
+  evaluate_policy     Evaluate a Rego module against an input document,
+                      in-process. No external service required.
+  authzen_evaluate    POST a subject/resource/action/context bundle to an
+                      AuthZEN 1.0 PDP and return its decision.
+
+Configuration (authzen_evaluate only):
+  AUTHZEN_PDP_URL     Default PDP evaluation endpoint, e.g.
+                      http://localhost:8181/access/v1/evaluation
+  AUTHZEN_PDP_TOKEN   Optional Authorization header value. A bare token is
+                      sent as "Bearer <token>".
 
 Configure with an MCP client (Claude Code example):
-  claude mcp add opa -- mcp-opa`)
+  claude mcp add opa-authz -- mcp-opa-authz`)
 			return
 		}
 	}
 
 	s := server.NewMCPServer(
-		"mcp-opa",
+		"mcp-opa-authz",
 		version,
 		server.WithToolCapabilities(false),
 	)
 
-	s.AddTool(
-		mcp.NewTool("evaluate_policy",
-			mcp.WithDescription(
-				"Evaluate a Rego policy module against an input document and "+
-					"optional data namespace. Returns the resulting decision "+
-					"set as JSON."),
-			mcp.WithString("rego",
-				mcp.Required(),
-				mcp.Description("Rego source code defining the policy. "+
-					"Must include a package declaration."),
-			),
-			mcp.WithString("query",
-				mcp.Required(),
-				mcp.Description("Rego query to evaluate, e.g. "+
-					"'data.example.allow' or 'data.example.violations[_]'."),
-			),
-			mcp.WithString("input_json",
-				mcp.Description("JSON-encoded input document (the "+
-					"`input` variable inside Rego)."),
-			),
-			mcp.WithString("data_json",
-				mcp.Description("JSON-encoded base document seeding the "+
-					"`data` namespace (in-memory store)."),
-			),
-		),
-		evaluatePolicy,
-	)
+	registerOPATool(s)
+	registerAuthZENTool(s)
 
 	if err := server.ServeStdio(s); err != nil {
-		log.Fatalf("mcp-opa: %v", err)
+		log.Fatalf("mcp-opa-authz: %v", err)
 	}
-}
-
-func evaluatePolicy(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	regoSrc, err := req.RequireString("rego")
-	if err != nil {
-		return mcp.NewToolResultError("missing required arg `rego`: " + err.Error()), nil
-	}
-	query, err := req.RequireString("query")
-	if err != nil {
-		return mcp.NewToolResultError("missing required arg `query`: " + err.Error()), nil
-	}
-
-	var input any
-	if s := req.GetString("input_json", ""); s != "" {
-		if err := json.Unmarshal([]byte(s), &input); err != nil {
-			return mcp.NewToolResultError("input_json is not valid JSON: " + err.Error()), nil
-		}
-	}
-
-	options := []func(*rego.Rego){
-		rego.Query(query),
-		rego.Module("policy.rego", regoSrc),
-	}
-
-	if s := req.GetString("data_json", ""); s != "" {
-		var data map[string]any
-		if err := json.Unmarshal([]byte(s), &data); err != nil {
-			return mcp.NewToolResultError("data_json is not valid JSON object: " + err.Error()), nil
-		}
-		options = append(options, rego.Store(inmem.NewFromObject(data)))
-	}
-
-	prepared, err := rego.New(options...).PrepareForEval(ctx)
-	if err != nil {
-		return mcp.NewToolResultError("rego prepare error: " + err.Error()), nil
-	}
-	rs, err := prepared.Eval(ctx, rego.EvalInput(input))
-	if err != nil {
-		return mcp.NewToolResultError("rego eval error: " + err.Error()), nil
-	}
-
-	out, err := json.MarshalIndent(rs, "", "  ")
-	if err != nil {
-		return mcp.NewToolResultError("failed to marshal result: " + err.Error()), nil
-	}
-
-	return mcp.NewToolResultText(string(out)), nil
 }

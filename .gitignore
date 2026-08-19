@@ -1,4 +1,4 @@
-/mcp-opa
+/mcp-opa-authz
 /dist/
 *.test
 *.out

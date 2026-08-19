@@ -1,4 +1,4 @@
-BIN := mcp-opa
+BIN := mcp-opa-authz
 PKG := ./...
 
 .PHONY: build test vet lint smoke clean fmt tidy

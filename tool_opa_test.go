@@ -21,18 +21,6 @@ func callTool(t *testing.T, args map[string]any) *mcp.CallToolResult {
 	return res
 }
 
-func resultText(t *testing.T, res *mcp.CallToolResult) string {
-	t.Helper()
-	if len(res.Content) == 0 {
-		t.Fatal("empty result content")
-	}
-	tc, ok := mcp.AsTextContent(res.Content[0])
-	if !ok {
-		t.Fatalf("first content block is not text: %T", res.Content[0])
-	}
-	return tc.Text
-}
-
 func TestEvaluatePolicy_Allow(t *testing.T) {
 	res := callTool(t, map[string]any{
 		"rego": `package example

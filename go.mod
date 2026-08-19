@@ -1,4 +1,4 @@
-module github.com/0-draft/mcp-opa
+module github.com/kanywst/mcp-opa-authz
 
 go 1.26.6
 

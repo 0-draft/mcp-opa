@@ -1,6 +1,6 @@
 version: 2
 
-project_name: mcp-opa
+project_name: mcp-opa-authz
 
 before:
   hooks:
@@ -9,8 +9,8 @@ before:
     - go mod verify
 
 builds:
-  - id: mcp-opa
-    binary: mcp-opa
+  - id: mcp-opa-authz
+    binary: mcp-opa-authz
     main: ./
     goos:
       - darwin
