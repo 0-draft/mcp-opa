@@ -32,6 +32,7 @@ The first release since the `mcp-opa` / `mcp-authzen` merge. It brings the AuthZ
 - **Redirects from a PDP are refused** rather than followed. Following one would send the `Authorization` header to a host the operator never configured and take a decision from an origin nobody chose.
 - **`pdp_url` rejects userinfo** (`http://user:pass@host`), which would otherwise be sent to a host the configured token was not issued for and echoed into error messages.
 - **PDP error bodies are truncated** to 512 bytes before reaching the model's context; the read limit alone allowed a megabyte of an error page through.
+- **`print()` output from an evaluated policy is bounded** — 200 lines, 1 KiB each — and reports `printed_truncated` when cut. The policy is model-supplied and runs in-process for the whole evaluation budget, so an unbounded `print()` loop was both a way to grow this process and a way to fill the model's context.
 - **Panic recovery** on tool handlers, so a panic inside OPA cannot take down the client's whole session.
 
 ### Fixed
