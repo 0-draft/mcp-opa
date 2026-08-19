@@ -130,6 +130,19 @@ jobs:
             | docker run -i --rm ghcr.io/kanywst/mcp-opa-authz:latest-amd64 \
             | jq -e 'select(.id == 2) | (.result.tools | length) == 4' > /dev/null
 
+      # The registry refuses to list an image that does not name the server it
+      # belongs to, and says so only at publish time — on a tag, after the
+      # release has shipped. v0.2.0's listing failed on exactly this.
+      - name: Check the release image names the server for the registry
+        run: |
+          want=$(jq -r '.name' server.json)
+          got=$(docker inspect ghcr.io/kanywst/mcp-opa-authz:latest-amd64 \
+            --format '{{index .Config.Labels "io.modelcontextprotocol.server.name"}}')
+          if [ "$got" != "$want" ]; then
+            echo "::error::the release image labels io.modelcontextprotocol.server.name as '$got'; server.json names the server '$want'. The MCP registry will refuse the listing."
+            exit 1
+          fi
+
   # The container image is a supported way to run this and the only channel the
   # MCP registry accepts, so a broken Dockerfile is a broken release.
   docker:

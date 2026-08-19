@@ -27,6 +27,12 @@ LABEL org.opencontainers.image.title="mcp-opa-authz" \
       org.opencontainers.image.source="https://github.com/kanywst/mcp-opa-authz" \
       org.opencontainers.image.licenses="MIT"
 
+# The MCP registry will not list an image that does not name the server it
+# belongs to. The value must match `name` in server.json exactly — it is how the
+# registry proves the io.github.kanywst namespace owns this image, the same job
+# npm's `mcpName` does for a package.
+LABEL io.modelcontextprotocol.server.name="io.github.kanywst/mcp-opa-authz"
+
 COPY --from=build /out/mcp-opa-authz /usr/local/bin/mcp-opa-authz
 
 USER nonroot:nonroot
