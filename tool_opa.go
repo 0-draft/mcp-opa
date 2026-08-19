@@ -1,89 +1,274 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
+	"sync"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
+	"github.com/open-policy-agent/opa/v1/ast"
 	"github.com/open-policy-agent/opa/v1/rego"
 	"github.com/open-policy-agent/opa/v1/storage/inmem"
+	"github.com/open-policy-agent/opa/v1/topdown"
+	"github.com/open-policy-agent/opa/v1/topdown/print"
 )
 
-func registerOPATool(s *server.MCPServer) {
+// maxTraceLines bounds the explanation returned to the model. A trace of a
+// non-trivial policy runs to thousands of lines; past a couple of hundred it
+// stops being an explanation and starts being a way to fill a context window.
+const maxTraceLines = 200
+
+// evaluateResult is the structured result of evaluate_policy.
+//
+// The bare OPA ResultSet is a poor answer to give a model. An undefined
+// document comes back as `[]`, which reads as "false" to anything that is not
+// already fluent in Rego — and "the policy did not allow" and "the policy has
+// no opinion" are different findings. Decision and Defined say which happened
+// in the first two fields.
+type evaluateResult struct {
+	// Defined reports whether the query produced any result at all.
+	Defined bool `json:"defined"`
+	// Value is the single expression value when the query produced exactly one
+	// result with exactly one expression — the shape of `data.pkg.allow` and of
+	// nearly every authorization query. Null otherwise; read ResultSet instead.
+	Value any `json:"value"`
+	// ResultSet is OPA's own result, unmodified.
+	ResultSet rego.ResultSet `json:"result_set"`
+	// Printed collects output from print() calls in the policy, in evaluation
+	// order.
+	Printed []string `json:"printed,omitempty"`
+	// Trace is a pretty-printed evaluation trace, present only when the caller
+	// asked for one.
+	Trace []string `json:"trace,omitempty"`
+	// TraceTruncated reports that Trace was cut at maxTraceLines.
+	TraceTruncated bool `json:"trace_truncated,omitempty"`
+}
+
+func registerOPATool(s *server.MCPServer, cfg *config) {
 	s.AddTool(
 		mcp.NewTool("evaluate_policy",
 			mcp.WithDescription(
-				"Evaluate a Rego policy module against an input document and "+
-					"optional data namespace. Runs in-process via OPA, no "+
-					"external service. Returns the resulting decision set as "+
-					"JSON."),
+				"Evaluate a Rego policy module against an input document and optional "+
+					"data namespace. Runs in-process via OPA; no external service is "+
+					"contacted, and the built-ins that could contact one are disabled. "+
+					"Use this to author or debug a policy whose source you have. "+
+					"Returns the decision, whether the query was defined at all, the raw "+
+					"OPA result set, and any print() output."),
+			mcp.WithTitleAnnotation("Evaluate a Rego policy"),
+			// The tool computes; it does not change anything, here or anywhere
+			// else, and the same arguments always give the same answer.
+			mcp.WithReadOnlyHintAnnotation(true),
+			mcp.WithDestructiveHintAnnotation(false),
+			mcp.WithIdempotentHintAnnotation(true),
+			mcp.WithOpenWorldHintAnnotation(false),
+			mcp.WithOutputSchema[evaluateResult](),
 			mcp.WithString("rego",
 				mcp.Required(),
-				mcp.Description("Rego source code defining the policy. "+
-					"Must include a package declaration."),
+				mcp.Description("Rego source for the policy module. Must include a "+
+					"`package` declaration. Rego v1 syntax by default: rule bodies need "+
+					"`if`, and multi-value rules need `contains`."),
 			),
 			mcp.WithString("query",
 				mcp.Required(),
-				mcp.Description("Rego query to evaluate, e.g. "+
-					"'data.example.allow' or 'data.example.violations[_]'."),
+				mcp.Description("Rego query to evaluate, e.g. `data.example.allow` or "+
+					"`data.example.violations[_]`."),
 			),
 			mcp.WithString("input_json",
-				mcp.Description("JSON-encoded input document (the "+
-					"`input` variable inside Rego)."),
+				mcp.Description("JSON-encoded input document — the `input` variable "+
+					"inside the policy."),
 			),
 			mcp.WithString("data_json",
-				mcp.Description("JSON-encoded base document seeding the "+
-					"`data` namespace (in-memory store)."),
+				mcp.Description("JSON-encoded base document seeding the `data` "+
+					"namespace, for policies that read reference data."),
+			),
+			mcp.WithString("rego_version",
+				mcp.Description("Rego syntax version: `v1` (default) or `v0` for "+
+					"pre-OPA-1.0 policies written without `if`/`contains`."),
+				mcp.Enum("v1", "v0"),
+			),
+			mcp.WithBoolean("trace",
+				mcp.Description("Return a pretty-printed evaluation trace. Use this to "+
+					"find out why a rule did not fire; it is verbose, so leave it off "+
+					"until a result is surprising."),
 			),
 		),
-		evaluatePolicy,
+		func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			return evaluatePolicy(ctx, req, cfg)
+		},
 	)
 }
 
-func evaluatePolicy(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	regoSrc, err := req.RequireString("rego")
+func evaluatePolicy(ctx context.Context, req mcp.CallToolRequest, cfg *config) (*mcp.CallToolResult, error) {
+	regoSrc, err := requiredString(req, "rego", cfg.MaxArgBytes)
 	if err != nil {
-		return mcp.NewToolResultError("missing required arg `rego`: " + err.Error()), nil
+		return toolErrorf("%v", err), nil
 	}
-	query, err := req.RequireString("query")
+	query, err := requiredString(req, "query", cfg.MaxArgBytes)
 	if err != nil {
-		return mcp.NewToolResultError("missing required arg `query`: " + err.Error()), nil
+		return toolErrorf("%v", err), nil
+	}
+
+	var regoVersion ast.RegoVersion
+	switch v := req.GetString("rego_version", "v1"); v {
+	case "v1", "":
+		regoVersion = ast.RegoV1
+	case "v0":
+		regoVersion = ast.RegoV0
+	default:
+		return toolErrorf("rego_version must be %q or %q, got %q", "v1", "v0", v), nil
 	}
 
 	var input any
-	if s := req.GetString("input_json", ""); s != "" {
-		if err := json.Unmarshal([]byte(s), &input); err != nil {
-			return mcp.NewToolResultError("input_json is not valid JSON: " + err.Error()), nil
-		}
+	if _, err := optionalJSON(req, "input_json", cfg.MaxArgBytes, &input); err != nil {
+		return toolErrorf("%v", err), nil
 	}
 
+	printer := &printCollector{}
 	options := []func(*rego.Rego){
 		rego.Query(query),
 		rego.Module("policy.rego", regoSrc),
+		rego.SetRegoVersion(regoVersion),
+		// Without a capability set OPA compiles against everything it can do,
+		// including the built-ins that leave the process. See
+		// opa_capabilities.go.
+		rego.Capabilities(cfg.capabilities()),
+		// A policy under development is full of print(). Discarding it and then
+		// asking a model to work out why a rule did not fire is needless.
+		rego.EnablePrintStatements(true),
+		rego.PrintHook(printer),
+		// Default OPA behaviour is for a failing built-in to make its
+		// expression undefined, which surfaces as "the policy denied" rather
+		// than "the policy is broken". For a debugging tool that distinction is
+		// the whole point.
+		rego.StrictBuiltinErrors(true),
 	}
 
-	if s := req.GetString("data_json", ""); s != "" {
-		var data map[string]any
-		if err := json.Unmarshal([]byte(s), &data); err != nil {
-			return mcp.NewToolResultError("data_json is not valid JSON object: " + err.Error()), nil
+	// `data` is an object at the root; anything else cannot seed the store.
+	var data map[string]any
+	if ok, err := optionalJSON(req, "data_json", cfg.MaxArgBytes, &data); err != nil {
+		return toolErrorf("%v", err), nil
+	} else if ok {
+		if data == nil {
+			return toolErrorf("argument %q must be a JSON object", "data_json"), nil
 		}
 		options = append(options, rego.Store(inmem.NewFromObject(data)))
 	}
 
-	prepared, err := rego.New(options...).PrepareForEval(ctx)
-	if err != nil {
-		return mcp.NewToolResultError("rego prepare error: " + err.Error()), nil
-	}
-	rs, err := prepared.Eval(ctx, rego.EvalInput(input))
-	if err != nil {
-		return mcp.NewToolResultError("rego eval error: " + err.Error()), nil
-	}
-
-	out, err := json.MarshalIndent(rs, "", "  ")
-	if err != nil {
-		return mcp.NewToolResultError("failed to marshal result: " + err.Error()), nil
+	// The tracer attaches to the evaluation, not to the prepared query: a
+	// prepared query is compiled once and evaluated with per-call options, and
+	// passing the tracer to rego.New here would silently collect nothing.
+	var evalOptions []rego.EvalOption
+	var tracer *topdown.BufferTracer
+	if req.GetBool("trace", false) {
+		tracer = topdown.NewBufferTracer()
+		evalOptions = append(evalOptions, rego.EvalQueryTracer(tracer))
 	}
 
-	return mcp.NewToolResultText(string(out)), nil
+	// Nothing bounds how long a Rego evaluation runs, and the source came from
+	// the model. Without a deadline one bad comprehension over a large
+	// data_json wedges the server for the life of the session, with no way for
+	// the client to recover short of killing the subprocess.
+	evalCtx, cancel := context.WithTimeout(ctx, cfg.RegoTimeout)
+	defer cancel()
+
+	prepared, err := rego.New(options...).PrepareForEval(evalCtx)
+	if err != nil {
+		return toolErrorf("rego compile error: %v%s", err, sandboxHint(err, cfg)), nil
+	}
+
+	rs, err := prepared.Eval(evalCtx, append(evalOptions, rego.EvalInput(input))...)
+	if err != nil {
+		if errors.Is(evalCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
+			return toolErrorf(
+				"rego evaluation exceeded the %s limit (raise %s if the policy is "+
+					"legitimately this expensive)", cfg.RegoTimeout, envRegoTimeout), nil
+		}
+		return toolErrorf("rego eval error: %v", err), nil
+	}
+
+	out := evaluateResult{
+		Defined:   len(rs) > 0,
+		Value:     singleValue(rs),
+		ResultSet: rs,
+		Printed:   printer.lines(),
+	}
+	if tracer != nil {
+		out.Trace, out.TraceTruncated = formatTrace(*tracer)
+	}
+
+	text, err := json.MarshalIndent(out, "", "  ")
+	if err != nil {
+		return toolErrorf("failed to encode result: %v", err), nil
+	}
+	return mcp.NewToolResultStructured(out, string(text)), nil
+}
+
+// singleValue returns the value of the one expression in the one result, when
+// that is the shape of the result set. Returns nil otherwise, which is also
+// what a result set holding a literal null returns — callers that need to tell
+// those apart have ResultSet.
+func singleValue(rs rego.ResultSet) any {
+	if len(rs) != 1 || len(rs[0].Expressions) != 1 {
+		return nil
+	}
+	return rs[0].Expressions[0].Value
+}
+
+// sandboxHint turns "undefined function http.send" into an answer. The compile
+// error is otherwise indistinguishable from a typo, and a model will happily
+// spend a turn or two re-spelling the built-in it is not allowed to call.
+func sandboxHint(err error, cfg *config) string {
+	if cfg.AllowNetworkBuiltins {
+		return ""
+	}
+	msg := err.Error()
+	for _, name := range sandboxedBuiltins {
+		if strings.Contains(msg, name) {
+			return fmt.Sprintf(
+				"\n\nnote: %s is disabled in this sandbox because a policy evaluated here "+
+					"is model-supplied and runs inside the MCP server process. Set %s=true "+
+					"to re-enable it, understanding that the policy can then reach the "+
+					"network from wherever this server runs.", name, envAllowNetBuilt)
+		}
+	}
+	return ""
+}
+
+// formatTrace renders a buffered trace, capped. Reports whether it was cut.
+func formatTrace(events []*topdown.Event) ([]string, bool) {
+	if len(events) == 0 {
+		return nil, false
+	}
+	var buf bytes.Buffer
+	topdown.PrettyTraceWithLocation(&buf, events)
+	lines := strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
+	if len(lines) > maxTraceLines {
+		return lines[:maxTraceLines], true
+	}
+	return lines, false
+}
+
+// printCollector captures print() output. OPA may evaluate concurrently, so the
+// hook has to be safe to call from more than one goroutine.
+type printCollector struct {
+	mu  sync.Mutex
+	out []string
+}
+
+func (p *printCollector) Print(_ print.Context, msg string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.out = append(p.out, msg)
+	return nil
+}
+
+func (p *printCollector) lines() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.out
 }

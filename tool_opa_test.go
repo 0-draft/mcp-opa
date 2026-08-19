@@ -5,91 +5,399 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
 )
 
-func callTool(t *testing.T, args map[string]any) *mcp.CallToolResult {
+func callPolicy(t *testing.T, cfg *config, args map[string]any) *mcp.CallToolResult {
 	t.Helper()
-	req := mcp.CallToolRequest{}
-	req.Params.Name = "evaluate_policy"
-	req.Params.Arguments = args
-	res, err := evaluatePolicy(context.Background(), req)
+	res, err := evaluatePolicy(context.Background(), newRequest("evaluate_policy", args), cfg)
 	if err != nil {
-		t.Fatalf("evaluatePolicy returned non-nil err: %v", err)
+		t.Fatalf("evaluatePolicy returned a non-nil error, which the transport would "+
+			"report as a fault instead of showing the model: %v", err)
 	}
 	return res
 }
 
-func TestEvaluatePolicy_Allow(t *testing.T) {
-	res := callTool(t, map[string]any{
-		"rego": `package example
+const adminPolicy = `package example
 
 default allow := false
 
-allow if {
-	input.role == "admin"
-}`,
+allow if input.role == "admin"`
+
+func TestEvaluatePolicy_Allow(t *testing.T) {
+	res := callPolicy(t, testConfig(), map[string]any{
+		"rego":       adminPolicy,
 		"query":      "data.example.allow",
-		"input_json": `{"role": "admin"}`,
+		"input_json": `{"role":"admin"}`,
 	})
 
-	if res.IsError {
-		t.Fatalf("expected success, got error: %s", resultText(t, res))
+	out := structured[evaluateResult](t, res)
+	if !out.Defined {
+		t.Fatal("expected the query to be defined")
 	}
-
-	var rs []map[string]any
-	if err := json.Unmarshal([]byte(resultText(t, res)), &rs); err != nil {
-		t.Fatalf("result is not a JSON array: %v", err)
+	if out.Value != true {
+		t.Fatalf("value = %#v, want true", out.Value)
 	}
-	if len(rs) == 0 {
-		t.Fatal("empty result set; expected one binding with allow=true")
-	}
-
-	exprs, ok := rs[0]["expressions"].([]any)
-	if !ok || len(exprs) == 0 {
-		t.Fatalf("missing expressions in result: %#v", rs[0])
-	}
-	first := exprs[0].(map[string]any)
-	if first["value"] != true {
-		t.Fatalf("expected allow=true, got: %#v", first["value"])
+	if len(out.ResultSet) != 1 {
+		t.Fatalf("result set has %d entries, want 1", len(out.ResultSet))
 	}
 }
 
 func TestEvaluatePolicy_Deny(t *testing.T) {
-	res := callTool(t, map[string]any{
-		"rego": `package example
-default allow := false`,
+	res := callPolicy(t, testConfig(), map[string]any{
+		"rego":       adminPolicy,
 		"query":      "data.example.allow",
-		"input_json": `{}`,
+		"input_json": `{"role":"guest"}`,
 	})
 
-	if res.IsError {
-		t.Fatalf("expected success, got error: %s", resultText(t, res))
+	out := structured[evaluateResult](t, res)
+	if out.Value != false {
+		t.Fatalf("value = %#v, want false", out.Value)
 	}
-	if !strings.Contains(resultText(t, res), `"value": false`) {
-		t.Fatalf("expected allow=false in output: %s", resultText(t, res))
+	if !out.Defined {
+		t.Fatal("a default rule makes the query defined even when it denies")
 	}
+}
+
+// The distinction this test protects is the reason evaluateResult has a
+// Defined field: a query with no default produces an empty result set, and
+// "undefined" is not "false".
+func TestEvaluatePolicy_UndefinedIsNotDeny(t *testing.T) {
+	res := callPolicy(t, testConfig(), map[string]any{
+		"rego": `package example
+
+allow if input.role == "admin"`,
+		"query":      "data.example.allow",
+		"input_json": `{"role":"guest"}`,
+	})
+
+	out := structured[evaluateResult](t, res)
+	if out.Defined {
+		t.Fatal("a rule with no default is undefined when its body fails")
+	}
+	if len(out.ResultSet) != 0 {
+		t.Fatalf("result set should be empty, got %d entries", len(out.ResultSet))
+	}
+	if out.Value != nil {
+		t.Fatalf("value = %#v, want null for an undefined query", out.Value)
+	}
+}
+
+func TestEvaluatePolicy_DataNamespace(t *testing.T) {
+	res := callPolicy(t, testConfig(), map[string]any{
+		"rego": `package example
+
+allow if input.user in data.admins`,
+		"query":      "data.example.allow",
+		"input_json": `{"user":"alice"}`,
+		"data_json":  `{"admins":["alice","bob"]}`,
+	})
+
+	out := structured[evaluateResult](t, res)
+	if out.Value != true {
+		t.Fatalf("value = %#v, want true; the data namespace was not seeded", out.Value)
+	}
+}
+
+func TestEvaluatePolicy_CapturesPrintOutput(t *testing.T) {
+	res := callPolicy(t, testConfig(), map[string]any{
+		"rego": `package example
+
+allow if {
+	print("checking role", input.role)
+	input.role == "admin"
+}`,
+		"query":      "data.example.allow",
+		"input_json": `{"role":"admin"}`,
+	})
+
+	out := structured[evaluateResult](t, res)
+	if len(out.Printed) == 0 {
+		t.Fatal("print() output was discarded")
+	}
+	if !strings.Contains(out.Printed[0], "checking role") {
+		t.Fatalf("printed = %q, want it to contain the message", out.Printed)
+	}
+}
+
+func TestEvaluatePolicy_TraceOptIn(t *testing.T) {
+	args := map[string]any{
+		"rego":       adminPolicy,
+		"query":      "data.example.allow",
+		"input_json": `{"role":"guest"}`,
+	}
+
+	off := structured[evaluateResult](t, callPolicy(t, testConfig(), args))
+	if len(off.Trace) != 0 {
+		t.Fatalf("trace should be absent unless asked for, got %d lines", len(off.Trace))
+	}
+
+	args["trace"] = true
+	on := structured[evaluateResult](t, callPolicy(t, testConfig(), args))
+	if len(on.Trace) == 0 {
+		t.Fatal("trace was requested but not returned")
+	}
+	if len(on.Trace) > maxTraceLines {
+		t.Fatalf("trace is %d lines, over the %d cap", len(on.Trace), maxTraceLines)
+	}
+}
+
+func TestEvaluatePolicy_RegoV0(t *testing.T) {
+	// A pre-OPA-1.0 policy: no `if`, no `contains`.
+	v0 := `package example
+
+default allow = false
+
+allow {
+	input.role == "admin"
+}`
+
+	if res := callPolicy(t, testConfig(), map[string]any{
+		"rego":       v0,
+		"query":      "data.example.allow",
+		"input_json": `{"role":"admin"}`,
+	}); !res.IsError {
+		t.Fatal("v0 syntax should not compile under the v1 default")
+	}
+
+	res := callPolicy(t, testConfig(), map[string]any{
+		"rego":         v0,
+		"query":        "data.example.allow",
+		"input_json":   `{"role":"admin"}`,
+		"rego_version": "v0",
+	})
+	out := structured[evaluateResult](t, res)
+	if out.Value != true {
+		t.Fatalf("value = %#v, want true under rego_version=v0", out.Value)
+	}
+}
+
+func TestEvaluatePolicy_RejectsUnknownRegoVersion(t *testing.T) {
+	res := callPolicy(t, testConfig(), map[string]any{
+		"rego":         adminPolicy,
+		"query":        "data.example.allow",
+		"rego_version": "v2",
+	})
+	requireToolError(t, res, "rego_version")
+}
+
+// --- the sandbox ------------------------------------------------------------
+
+// The policy source comes from a model. These three built-ins are the ones that
+// can leave the process, and each has its own reason to be gone; see
+// opa_capabilities.go.
+func TestEvaluatePolicy_NetworkBuiltinsAreDisabled(t *testing.T) {
+	policies := map[string]string{
+		"http.send": `package example
+
+allow if {
+	r := http.send({"method": "GET", "url": "http://169.254.169.254/latest/meta-data/"})
+	r.status_code == 200
+}`,
+		"net.lookup_ip_addr": `package example
+
+allow if net.lookup_ip_addr("example.com")`,
+		"opa.runtime": `package example
+
+allow if opa.runtime().env.PATH != ""`,
+	}
+
+	for name, src := range policies {
+		t.Run(name, func(t *testing.T) {
+			res := callPolicy(t, testConfig(), map[string]any{
+				"rego":  src,
+				"query": "data.example.allow",
+			})
+			msg := requireToolError(t, res, name)
+			if !strings.Contains(msg, envAllowNetBuilt) {
+				t.Fatalf("the error should say how to re-enable it: %s", msg)
+			}
+		})
+	}
+}
+
+func TestEvaluatePolicy_NetworkBuiltinsCanBeReEnabled(t *testing.T) {
+	cfg := testConfig()
+	cfg.AllowNetworkBuiltins = true
+
+	// Compilation is the assertion — opa.runtime() needs no network, so this
+	// checks the capability set without making the test depend on one.
+	res := callPolicy(t, cfg, map[string]any{
+		"rego": `package example
+
+env := opa.runtime().env`,
+		"query": "data.example.env",
+	})
+	requireNoToolError(t, res)
+}
+
+func TestSandboxCapabilities_DropsExactlyTheNamedBuiltins(t *testing.T) {
+	have := map[string]bool{}
+	for _, b := range sandboxCapabilities.Builtins {
+		have[b.Name] = true
+	}
+	for _, name := range sandboxedBuiltins {
+		if have[name] {
+			t.Errorf("%s is still in the sandboxed capability set", name)
+		}
+	}
+
+	// Everything else survives. Time and JWT built-ins in particular are load
+	// bearing in real authorization policies, so an over-broad filter — every
+	// nondeterministic built-in, say — would be a regression.
+	for _, name := range []string{"time.now_ns", "io.jwt.decode_verify", "uuid.rfc4122", "rand.intn"} {
+		if !have[name] {
+			t.Errorf("%s was removed; the sandbox is meant to drop only network and host access", name)
+		}
+	}
+	if len(sandboxCapabilities.Builtins) != len(baseCapabilities.Builtins)-len(sandboxedBuiltins) {
+		t.Errorf("dropped %d built-ins, want %d",
+			len(baseCapabilities.Builtins)-len(sandboxCapabilities.Builtins), len(sandboxedBuiltins))
+	}
+	if baseCapabilities.AllowNet != nil {
+		t.Error("the base capability set was mutated; it must stay shared and untouched")
+	}
+	if sandboxCapabilities.AllowNet == nil || len(sandboxCapabilities.AllowNet) != 0 {
+		t.Error("sandbox AllowNet must be empty-and-non-nil, which OPA reads as \"no host\"")
+	}
+}
+
+// --- bounds and failure modes -----------------------------------------------
+
+func TestEvaluatePolicy_TimesOut(t *testing.T) {
+	cfg := shortTimeoutConfig(50 * time.Millisecond)
+
+	// A cross product large enough to outlast the deadline but small enough to
+	// not matter if the deadline somehow fails to fire.
+	res := callPolicy(t, cfg, map[string]any{
+		"rego": `package example
+
+n := numbers.range(1, 700)
+
+allow contains [a, b, c] if {
+	some a in n
+	some b in n
+	some c in n
+	a + b + c == 42
+}`,
+		"query": "data.example.allow",
+	})
+	requireToolError(t, res, envRegoTimeout)
+}
+
+// The caller's own cancellation must not be reported as the evaluation
+// exceeding its budget — the two have different fixes.
+func TestEvaluatePolicy_CallerCancellationIsNotATimeout(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	res, err := evaluatePolicy(ctx, newRequest("evaluate_policy", map[string]any{
+		"rego":  adminPolicy,
+		"query": "data.example.allow",
+	}), testConfig())
+	if err != nil {
+		t.Fatalf("unexpected transport error: %v", err)
+	}
+	if res.IsError && strings.Contains(resultText(t, res), envRegoTimeout) {
+		t.Fatalf("a cancelled caller was reported as an evaluation timeout: %s", resultText(t, res))
+	}
+}
+
+func TestEvaluatePolicy_RejectsOversizedArguments(t *testing.T) {
+	cfg := testConfig()
+	cfg.MaxArgBytes = 64
+
+	res := callPolicy(t, cfg, map[string]any{
+		"rego":  "package example\n\n" + strings.Repeat("# padding\n", 100),
+		"query": "data.example.allow",
+	})
+	requireToolError(t, res, "over the 64 byte limit")
 }
 
 func TestEvaluatePolicy_BadRego(t *testing.T) {
-	res := callTool(t, map[string]any{
-		"rego":  `this is not valid rego`,
+	res := callPolicy(t, testConfig(), map[string]any{
+		"rego":  "this is not valid rego",
 		"query": "data.example.allow",
 	})
-	if !res.IsError {
-		t.Fatal("expected IsError=true for invalid rego")
-	}
+	requireToolError(t, res, "rego compile error")
 }
 
 func TestEvaluatePolicy_BadInputJSON(t *testing.T) {
-	res := callTool(t, map[string]any{
-		"rego": `package example
-allow := true`,
+	res := callPolicy(t, testConfig(), map[string]any{
+		"rego":       adminPolicy,
 		"query":      "data.example.allow",
-		"input_json": `{not json}`,
+		"input_json": "{not json}",
 	})
-	if !res.IsError {
-		t.Fatal("expected IsError=true for malformed input_json")
+	requireToolError(t, res, "input_json")
+}
+
+func TestEvaluatePolicy_RejectsNonObjectData(t *testing.T) {
+	res := callPolicy(t, testConfig(), map[string]any{
+		"rego":      adminPolicy,
+		"query":     "data.example.allow",
+		"data_json": `["not","an","object"]`,
+	})
+	requireToolError(t, res, "data_json")
+}
+
+func TestEvaluatePolicy_MissingRequiredArgs(t *testing.T) {
+	for _, missing := range []string{"rego", "query"} {
+		t.Run(missing, func(t *testing.T) {
+			args := map[string]any{"rego": adminPolicy, "query": "data.example.allow"}
+			delete(args, missing)
+			requireToolError(t, callPolicy(t, testConfig(), args), missing)
+		})
+	}
+}
+
+// A built-in that fails at runtime — here, a type error — must surface as an
+// error and not quietly become an undefined result the model reads as a deny.
+func TestEvaluatePolicy_StrictBuiltinErrors(t *testing.T) {
+	res := callPolicy(t, testConfig(), map[string]any{
+		"rego": `package example
+
+allow if {
+	x := split(input.value, ",")
+	count(x) > 0
+}`,
+		"query":      "data.example.allow",
+		"input_json": `{"value": 42}`,
+	})
+	requireToolError(t, res, "eval")
+}
+
+// The text fallback must stay parseable on its own: a client on an older MCP
+// revision never sees structuredContent.
+func TestEvaluatePolicy_TextFallbackIsSelfContained(t *testing.T) {
+	res := callPolicy(t, testConfig(), map[string]any{
+		"rego":       adminPolicy,
+		"query":      "data.example.allow",
+		"input_json": `{"role":"admin"}`,
+	})
+
+	var out evaluateResult
+	if err := json.Unmarshal([]byte(resultText(t, res)), &out); err != nil {
+		t.Fatalf("text content is not decodable JSON: %v", err)
+	}
+	if out.Value != true {
+		t.Fatalf("text fallback value = %#v, want true", out.Value)
+	}
+}
+
+func TestSingleValue(t *testing.T) {
+	res := callPolicy(t, testConfig(), map[string]any{
+		"rego": `package example
+
+pair contains x if some x in [1, 2]`,
+		"query": "data.example.pair[_]",
+	})
+	out := structured[evaluateResult](t, res)
+	if len(out.ResultSet) != 2 {
+		t.Fatalf("result set has %d entries, want 2", len(out.ResultSet))
+	}
+	if out.Value != nil {
+		t.Fatalf("value = %#v; it is only meaningful for a single-result query", out.Value)
 	}
 }
