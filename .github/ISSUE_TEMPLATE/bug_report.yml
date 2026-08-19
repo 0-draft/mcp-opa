@@ -1,0 +1,60 @@
+name: Bug report
+description: A tool answered wrongly, failed, or behaved unexpectedly
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For a security vulnerability, do not open an issue — see [SECURITY.md](https://github.com/kanywst/mcp-opa-authz/blob/main/SECURITY.md).
+
+  - type: dropdown
+    id: tool
+    attributes:
+      label: Which tool
+      options:
+        - evaluate_policy
+        - authzen_evaluate
+        - authzen_evaluate_batch
+        - authzen_discover
+        - the server itself (startup, transport, CLI)
+    validations:
+      required: true
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what you expected instead
+      description: |
+        If a decision was wrong, say which way. "Reported a deny" and "failed to
+        get a decision" are different bugs with different fixes.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction
+      description: |
+        The tool arguments, ideally as the JSON your client sent. For
+        `evaluate_policy`, the smallest policy and input that still shows it.
+      render: json
+    validations:
+      required: true
+
+  - type: textarea
+    id: version
+    attributes:
+      label: Version and environment
+      description: Output of `mcp-opa-authz --version`, your OS, and which MCP client launched it.
+      placeholder: |
+        mcp-opa-authz v0.1.0
+        macOS 15.2, Claude Code
+    validations:
+      required: true
+
+  - type: input
+    id: pdp
+    attributes:
+      label: PDP
+      description: For an authzen_* bug — which PDP implementation, and its version.
+      placeholder: opa-authzen-plugin v0.6.0

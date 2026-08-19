@@ -1,0 +1,8 @@
+# Every change gets one reviewer. The security-relevant files are listed
+# separately so a future co-maintainer arrangement does not quietly lose them.
+*                       @kanywst
+
+/opa_capabilities.go    @kanywst
+/authzen.go             @kanywst
+/SECURITY.md            @kanywst
+/.github/workflows/     @kanywst
