@@ -157,18 +157,37 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Validate server.json
+      # Validate against the schema server.json itself declares, rather than
+      # against a list of rules re-derived here. v0.2.0 was rejected at publish
+      # time for a 127-character description; the schema has carried
+      # `maxLength: 100` all along, and one check that reads it catches that
+      # plus everything like it.
+      - name: Validate server.json against its declared schema
         run: |
-          python3 -c "import json,sys; json.load(open('server.json'))"
-          jq -e '.name and .description and .version and (.packages | length > 0)' server.json > /dev/null
-          # The registry caps the description at 100 characters and only says so
-          # at publish time, on a tag, after the release has already shipped.
-          # v0.2.0 failed on exactly this with a 127-character one.
-          n=$(jq -r '.description | length' server.json)
-          if [ "$n" -gt 100 ]; then
-            echo "::error::server.json description is $n characters; the MCP registry rejects anything over 100"
+          pip install --quiet check-jsonschema
+          schema=$(jq -r '."$schema"' server.json)
+          if [ -z "$schema" ] || [ "$schema" = "null" ]; then
+            echo "::error::server.json declares no \$schema, so nothing can validate it"
             exit 1
           fi
+          curl -fsSL "$schema" -o /tmp/server.schema.json
+          check-jsonschema --schemafile /tmp/server.schema.json server.json
+
+      # Rules the registry enforces server-side and the schema does not express.
+      - name: Check the OCI package rules
+        run: |
+          # An OCI package must carry its version as the identifier's tag and
+          # must not also have a `version` field — the registry rejects that
+          # outright. v0.2.0 was rejected for exactly this, after the schema
+          # check above would have passed.
+          jq -e '
+            .packages[] | select(.registryType == "oci")
+            | (has("version") | not) and (.identifier | test(":[^:/]+$"))
+          ' server.json > /dev/null || {
+            echo "::error::an OCI package in server.json either carries a \`version\` field or has an untagged identifier; the tag belongs in the identifier (ghcr.io/owner/image:1.2.3) and nowhere else"
+            exit 1
+          }
+
           # The environment variables the manifest advertises have to be ones
           # the server actually reads, or the listing lies to whoever installs it.
           for v in $(jq -r '.packages[0].environmentVariables[].name' server.json); do
