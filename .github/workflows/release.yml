@@ -51,3 +51,16 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Called rather than triggered. `release: published` looks like the natural
+  # trigger and never fires: goreleaser creates the release with GITHUB_TOKEN,
+  # and GitHub does not start workflows from a GITHUB_TOKEN action. Calling the
+  # workflow keeps the listing in the same run as the image it points at.
+  publish-registry:
+    needs: release
+    uses: ./.github/workflows/publish-mcp-registry.yml
+    with:
+      version: ${{ github.ref_name }}
+    permissions:
+      contents: read
+      id-token: write
