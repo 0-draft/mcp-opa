@@ -40,13 +40,16 @@ release:
 sboms:
   - artifacts: archive
 
+# cosign 3.x (installed by cosign-installer v4) defaults to the Sigstore
+# bundle format and ignores --output-certificate / --output-signature, so the
+# signature and the certificate ship together in one .sigstore.json instead of
+# a separate .sig + .pem pair.
 signs:
   - cmd: cosign
-    certificate: "${artifact}.pem"
+    signature: "${artifact}.sigstore.json"
     args:
       - "sign-blob"
-      - "--output-certificate=${certificate}"
-      - "--output-signature=${signature}"
+      - "--bundle=${signature}"
       - "${artifact}"
       - "--yes"
     artifacts: checksum

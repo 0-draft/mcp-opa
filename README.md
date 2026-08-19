@@ -125,18 +125,23 @@ Flat on purpose. A single-binary MCP server does not need `cmd/`, `internal/`, o
 
 ## Verify a release
 
-Releases ship a `cosign`-signed checksum file (Sigstore keyless via GitHub OIDC) and a CycloneDX SBOM per archive.
+Releases ship a `cosign`-signed checksum file (Sigstore keyless via GitHub OIDC) and a CycloneDX SBOM per archive. The signature and its certificate travel together in one Sigstore bundle, `*-checksums.txt.sigstore.json`.
 
 ```bash
 TAG=v0.1.0
 gh release download "$TAG" -R kanywst/mcp-opa-authz -p '*-checksums.txt*'
 
 cosign verify-blob \
-  --certificate "mcp-opa-authz-${TAG#v}-checksums.txt.pem" \
-  --signature   "mcp-opa-authz-${TAG#v}-checksums.txt.sig" \
+  --bundle "mcp-opa-authz-${TAG#v}-checksums.txt.sigstore.json" \
   --certificate-identity-regexp 'https://github.com/kanywst/mcp-opa-authz/.github/workflows/release.yml@refs/tags/' \
   --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
   "mcp-opa-authz-${TAG#v}-checksums.txt"
+```
+
+Then check the archive you downloaded against that file:
+
+```bash
+sha256sum -c "mcp-opa-authz-${TAG#v}-checksums.txt" --ignore-missing
 ```
 
 ## License
