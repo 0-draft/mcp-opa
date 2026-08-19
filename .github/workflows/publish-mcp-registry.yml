@@ -2,16 +2,26 @@ name: publish to MCP registry
 
 # Listing in the official MCP registry is how a client discovers this server
 # without being told the repository name. The listing is per-version, so it runs
-# once per release — after the release workflow has pushed the image the
-# manifest points at.
+# once per release, after the image it points at has been pushed.
+#
+# Two entry points, one definition: release.yml calls this at the end of a tag
+# run, and workflow_dispatch re-runs it on its own when a listing needs fixing
+# without cutting another release. It is deliberately *not* triggered by
+# `release: published` — goreleaser creates the release with GITHUB_TOKEN, and
+# GitHub does not fire workflow triggers from a GITHUB_TOKEN action, so that
+# trigger never fires and the job silently never runs.
 
 on:
-  release:
-    types: [published]
+  workflow_call:
+    inputs:
+      version:
+        description: "Tag or version to publish, with or without the leading v"
+        required: true
+        type: string
   workflow_dispatch:
     inputs:
       version:
-        description: "Version to publish, without the leading v (e.g. 0.2.0)"
+        description: "Tag or version to publish, with or without the leading v (e.g. v0.2.0)"
         required: true
         type: string
 
@@ -35,7 +45,7 @@ jobs:
       # time with a message about the registry rather than about this file.
       - name: Stamp the released version into server.json
         env:
-          VERSION: ${{ inputs.version || github.event.release.tag_name }}
+          VERSION: ${{ inputs.version }}
         run: |
           v="${VERSION#v}"
           if [ -z "$v" ]; then
@@ -46,15 +56,20 @@ jobs:
           mv server.json.tmp server.json
           cat server.json
 
-      # The image has to be pullable before the registry will accept a manifest
-      # pointing at it. A release that failed halfway would otherwise produce a
-      # listing nobody can install.
-      - name: Verify the image exists
+      # The image has to be pullable *anonymously* before the registry will
+      # accept a manifest pointing at it, and a package pushed for the first
+      # time by GITHUB_TOKEN is private by default. Checking without credentials
+      # is the point: a listing pointing at a private image is a listing nobody
+      # can install.
+      - name: Verify the image is publicly pullable
         env:
-          VERSION: ${{ inputs.version || github.event.release.tag_name }}
+          VERSION: ${{ inputs.version }}
         run: |
           v="${VERSION#v}"
-          docker manifest inspect "ghcr.io/kanywst/mcp-opa-authz:${v}" > /dev/null
+          if ! docker manifest inspect "ghcr.io/kanywst/mcp-opa-authz:${v}" > /dev/null 2>&1; then
+            echo "::error::ghcr.io/kanywst/mcp-opa-authz:${v} is not anonymously pullable. If the release pushed it, the package is private — set its visibility to public under the repository's Packages settings. The registry listing would otherwise point at an image nobody can pull."
+            exit 1
+          fi
 
       - name: Install mcp-publisher
         run: |
